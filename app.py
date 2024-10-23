@@ -1,10 +1,11 @@
 import os
-from flask import Flask, render_template, request, redirect, url_for
+from flask import Flask, render_template, request
 from werkzeug.utils import secure_filename
 from PIL import Image
 import torch
 import torch.nn as nn
 from torchvision import models, transforms
+from google.cloud import storage  # Library untuk mengakses Google Cloud Storage
 
 app = Flask(__name__)
 UPLOAD_FOLDER = 'uploads/'
@@ -14,11 +15,27 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# Load the model (Assuming it's VGG19)
+# Fungsi untuk mendownload model dari Google Cloud Storage
+def download_model_from_gcs(bucket_name, source_blob_name, destination_file_name):
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(source_blob_name)
+    blob.download_to_filename(destination_file_name)
+    print(f'Model downloaded from GCS to {destination_file_name}')
+
+# Load model dari GCS dan cache-nya secara lokal
 def load_model():
+    model_path = 'model/vgg19Model.h5'
+    bucket_name = 'model-cancer-1'  # Ganti dengan nama bucket Anda
+    source_blob_name = 'vgg19Model.h5'  # Nama file di dalam bucket
+
+    # Cek apakah model sudah ada secara lokal, jika tidak, download dari GCS
+    if not os.path.exists(model_path):
+        download_model_from_gcs(bucket_name, source_blob_name, model_path)
+
     vgg19_model = models.vgg19(pretrained=True)
-    vgg19_model.classifier[6] = nn.Linear(4096, 1)  # Binary classification
-    vgg19_model.load_state_dict(torch.load('model/vgg19Model.h5', map_location=device))
+    vgg19_model.classifier[6] = nn.Linear(4096, 1)  # Klasifikasi binary
+    vgg19_model.load_state_dict(torch.load(model_path, map_location=device))
     vgg19_model.to(device)
     vgg19_model.eval()
     return vgg19_model
@@ -41,7 +58,7 @@ def upload_file():
             file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             file.save(file_path)
 
-            # Load and preprocess image
+            # Load dan preproses gambar
             img = Image.open(file_path).convert('RGB')
             transform = transforms.Compose([
                 transforms.Resize((224, 224)),
@@ -51,7 +68,7 @@ def upload_file():
             img_t = transform(img)
             batch_t = torch.unsqueeze(img_t, 0).to(device)
 
-            # Model prediction
+            # Prediksi menggunakan model
             output = model(batch_t)
             pred = torch.sigmoid(output).item()
             result = 'Benign' if pred < 0.5 else 'Malignant'
